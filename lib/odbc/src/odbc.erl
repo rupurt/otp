@@ -631,8 +631,10 @@ handle_cast(Msg, State) ->
 handle_info({tcp, Socket, BinData}, State = #state{state = connecting, 
 						reply_to = From,
 						odbc_socket = Socket}) ->
+    io:fwrite("### odbc#handle_info state=connecting ~n"),
     case binary_to_term(BinData) of
 	{ok, AbsolutSupport, RelativeSupport} ->
+            io:fwrite("### odbc#handle_info absolute_support=~w, relative_support=~w~n", [AbsolutSupport, RelativeSupport]),
 	    NewState = State#state{absolute_pos = AbsolutSupport,
 				   relative_pos = RelativeSupport},
 	    gen_server:reply(From, ok), 

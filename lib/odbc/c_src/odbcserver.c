@@ -724,7 +724,46 @@ static db_result_msg db_select_count(byte *sql, db_state *state)
 	   cursors, this is expected and will not cause any damage*/
 	SQLSetStmtAttr(statement_handle(state),
 		       (SQLINTEGER)SQL_ATTR_CURSOR_SCROLLABLE,
-		       (SQLPOINTER)SQL_SCROLLABLE, (SQLINTEGER)0);
+		       (SQLPOINTER)SQL_SCROLLABLE,
+                       (SQLINTEGER)0);
+        // /* Db2 requires cursor sensitivity to be set to support scrollable
+        //  * cursors. By default it is = SQL_UNSPECIFIED  */
+        // SQLSetStmtAttr(statement_handle(state),
+        //               (SQLINTEGER)SQL_ATTR_CURSOR_SENSITIVITY,
+        //               (SQLPOINTER)SQL_SENSITIVE,
+        //               (SQLINTEGER)0);
+        // /* Db2 z/OS & SQLServer do not support scrollable cursors as
+        //  * SQL_CURSOR_FORWARD_ONLY. Ideally we would also support passing
+        //  * `SQL_ATTR_CURSOR_TYPE` as an argument so that we can also support
+        //  * `SQL_CURSOR_TYPE_STATIC`.
+        //  * - https://www.ibm.com/docs/en/db2-for-zos/11?topic=odbc-scrollable-cursor-characteristics-in-db2
+        //  * - https://learn.microsoft.com/en-us/sql/odbc/reference/develop-app/cursor-characteristics-and-cursor-type?view=sql-server-ver16 */
+        // SQLSetStmtAttr(statement_handle(state),
+        //               (SQLINTEGER)SQL_ATTR_CURSOR_TYPE,
+        //               (SQLPOINTER)SQL_CURSOR_DYNAMIC,
+        //               (SQLINTEGER)0);
+        /* Db2 z/OS & SQLServer do not support scrollable cursors as
+         * SQL_CURSOR_FORWARD_ONLY. Ideally we would also support passing
+         * `SQL_ATTR_CURSOR_TYPE` as an argument so that we can also support
+         * `SQL_CURSOR_TYPE_DYNAMIC`.
+         * - https://www.ibm.com/docs/en/db2-for-zos/11?topic=odbc-scrollable-cursor-characteristics-in-db2
+         * - https://learn.microsoft.com/en-us/sql/odbc/reference/develop-app/cursor-characteristics-and-cursor-type?view=sql-server-ver16 */
+        /* Db2 requires cursor sensitivity to be set to support scrollable
+         * cursors. By default it is = SQL_UNSPECIFIED  */
+        SQLSetStmtAttr(statement_handle(state),
+                      (SQLINTEGER)SQL_ATTR_CURSOR_SENSITIVITY,
+                      (SQLPOINTER)SQL_INSENSITIVE,
+                      (SQLINTEGER)0);
+        SQLSetStmtAttr(statement_handle(state),
+                      (SQLINTEGER)SQL_ATTR_CURSOR_TYPE,
+                      (SQLPOINTER)SQL_CURSOR_STATIC,
+                      (SQLINTEGER)0);
+        // /* TODO:
+        //  * - pass rowset size as a parameter */
+        // SQLSetStmtAttr(statement_handle(state),
+        //               (SQLINTEGER)SQL_ATTR_ROW_ARRAY_SIZE,
+        //               (SQLPOINTER)SQL_ROWSET_SIZE,
+        //               (SQLINTEGER)0);
     }
     
     if(!sql_success(SQLExecDirect(statement_handle(state), (SQLCHAR *)sql, SQL_NTS))) {
@@ -734,6 +773,13 @@ static db_result_msg db_select_count(byte *sql, db_state *state)
                                     extended_error(state, diagnos.sqlState),
                                     diagnos.nativeError);
     }
+
+    /* TODO:
+     * - pass rowset size as a parameter */
+    SQLSetStmtAttr(statement_handle(state),
+                  (SQLINTEGER)SQL_ATTR_ROW_ARRAY_SIZE,
+                  (SQLPOINTER)ROWSET_SIZE,
+                  (SQLINTEGER)0);
   
     if(!sql_success(SQLNumResultCols(statement_handle(state),
 				     &num_of_columns)))
@@ -1382,30 +1428,28 @@ static db_result_msg encode_value_list(SQLSMALLINT num_of_columns,
     msg = encode_empty_message();
         
     for (;;) {
-	/* fetch the next row */
+	// fetch the next row set
 	result = SQLFetch(statement_handle(state)); 
-    
-	if (result == SQL_NO_DATA) /* Reached end of result set */
+	if (result == SQL_NO_DATA) // reached end of result sets
 	{
 	    break;
 	}
 
 	ei_x_encode_list_header(&dynamic_buffer(state), 1);
 
-	if(tuple_row(state)) {
-	    ei_x_encode_tuple_header(&dynamic_buffer(state),
-				     num_of_columns);
-	} else {
-	    ei_x_encode_list_header(&dynamic_buffer(state), num_of_columns);
-	}
-    
-	for (i = 0; i < num_of_columns; i++) {
-	    encode_column_dyn(columns(state)[i], i, state);
-	}
+        if(tuple_row(state)) {
+            ei_x_encode_tuple_header(&dynamic_buffer(state), num_of_columns);
+        } else {
+            ei_x_encode_list_header(&dynamic_buffer(state), num_of_columns);
+        }
 
-	if(!tuple_row(state)) {
-	    ei_x_encode_empty_list(&dynamic_buffer(state));
-	}
+        for (i = 0; i < num_of_columns; i++) {
+            encode_column_dyn(columns(state)[i], i, state);
+        }
+
+        if(!tuple_row(state)) {
+            ei_x_encode_empty_list(&dynamic_buffer(state));
+        }
     } 
     ei_x_encode_empty_list(&dynamic_buffer(state));
     return msg;
@@ -1419,8 +1463,9 @@ static db_result_msg encode_value_list_scroll(SQLSMALLINT num_of_columns,
 					      SQLINTEGER OffSet, int N,
 					      db_state *state)
 {
-    int i, j;
+    int r, c, j;
     SQLRETURN result;
+    SQLLEN num_rows_fetched = 0;
     db_result_msg msg;
 
     msg = encode_empty_message();
@@ -1434,26 +1479,32 @@ static db_result_msg encode_value_list_scroll(SQLSMALLINT num_of_columns,
 	    OffSet = 1;
 	}
 
-	result = SQLFetchScroll(statement_handle(state), Orientation,
-				OffSet); 
-    
-	if (result == SQL_NO_DATA) /* Reached end of result set */
+        if(j == 0) {
+	    ei_x_encode_list_header(&dynamic_buffer(state), 1);
+        }
+
+	result = SQLFetchScroll(statement_handle(state), Orientation, OffSet); 
+	if (result == SQL_NO_DATA) // reached end of result sets
 	{
 	    break;
 	}
-	ei_x_encode_list_header(&dynamic_buffer(state), 1);
 
-	if(tuple_row(state)) {
-	    ei_x_encode_tuple_header(&dynamic_buffer(state),
-				     num_of_columns);
-	} else {
-	    ei_x_encode_list_header(&dynamic_buffer(state), num_of_columns);
-	}
-	for (i = 0; i < num_of_columns; i++) {
-	    encode_column_dyn(columns(state)[i], i, state);
-	}
-	if(!tuple_row(state)) {
-	    ei_x_encode_empty_list(&dynamic_buffer(state));
+        result = SQLGetStmtAttr(statement_handle(state), SQL_ATTR_ROWS_FETCHED_PTR, &num_rows_fetched, 0, NULL);
+        // TODO:
+        // - ignore the fetched rows above
+        num_rows_fetched = 1;
+	for (r = 0; r < num_rows_fetched; r++) {
+	    if(tuple_row(state)) {
+	        ei_x_encode_tuple_header(&dynamic_buffer(state), num_of_columns);
+	    } else {
+	        ei_x_encode_list_header(&dynamic_buffer(state), num_of_columns);
+	    }
+            for (c = 0; c < num_of_columns; c++) {
+                encode_column_dyn(columns(state)[c], c, state);
+            }
+            if(!tuple_row(state)) {
+                ei_x_encode_empty_list(&dynamic_buffer(state));
+            }
 	}
     } 
     ei_x_encode_empty_list(&dynamic_buffer(state));

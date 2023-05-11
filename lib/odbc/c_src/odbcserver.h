@@ -22,6 +22,7 @@
 
 /* ----------------------------- CONSTANTS ------------------------------*/
 
+#define ROWSET_SIZE 128
 #define MAXCOLSIZE 8001
 #define MAX_ERR_MSG 1024
 #define ERRMSG_HEADR_SIZE 20
