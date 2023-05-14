@@ -1428,9 +1428,9 @@ static db_result_msg encode_value_list(SQLSMALLINT num_of_columns,
     msg = encode_empty_message();
         
     for (;;) {
-	// fetch the next row set
+	/* fetch the next row */
 	result = SQLFetch(statement_handle(state)); 
-	if (result == SQL_NO_DATA) // reached end of result sets
+	if (result == SQL_NO_DATA) /* Reached end of result set */
 	{
 	    break;
 	}
@@ -1438,7 +1438,8 @@ static db_result_msg encode_value_list(SQLSMALLINT num_of_columns,
 	ei_x_encode_list_header(&dynamic_buffer(state), 1);
 
         if(tuple_row(state)) {
-            ei_x_encode_tuple_header(&dynamic_buffer(state), num_of_columns);
+            ei_x_encode_tuple_header(&dynamic_buffer(state),
+                                     num_of_columns);
         } else {
             ei_x_encode_list_header(&dynamic_buffer(state), num_of_columns);
         }
@@ -1466,7 +1467,10 @@ static db_result_msg encode_value_list_scroll(SQLSMALLINT num_of_columns,
     int r, c, j;
     SQLRETURN result;
     SQLLEN num_rows_fetched = 0;
+    ei_x_buff rows_buffer;
     db_result_msg msg;
+
+    ei_x_new_with_version(&rows_buffer);
 
     msg = encode_empty_message();
     
@@ -1479,34 +1483,40 @@ static db_result_msg encode_value_list_scroll(SQLSMALLINT num_of_columns,
 	    OffSet = 1;
 	}
 
-        if(j == 0) {
-	    ei_x_encode_list_header(&dynamic_buffer(state), 1);
-        }
-
-	result = SQLFetchScroll(statement_handle(state), Orientation, OffSet); 
+	result = SQLFetchScroll(statement_handle(state), Orientation, OffSet);
 	if (result == SQL_NO_DATA) // reached end of result sets
 	{
 	    break;
 	}
 
-        result = SQLGetStmtAttr(statement_handle(state), SQL_ATTR_ROWS_FETCHED_PTR, &num_rows_fetched, 0, NULL);
-        // TODO:
-        // - ignore the fetched rows above
-        num_rows_fetched = 1;
+        SQLLEN row_set_num_rows_fetched = 0;
+        result = SQLGetStmtAttr(statement_handle(state), SQL_ATTR_ROWS_FETCHED_PTR, &row_set_num_rows_fetched, 0, NULL);
+        num_rows_fetched += row_set_num_rows_fetched;
 	for (r = 0; r < num_rows_fetched; r++) {
 	    if(tuple_row(state)) {
-	        ei_x_encode_tuple_header(&dynamic_buffer(state), num_of_columns);
+	        ei_x_encode_tuple_header(&rows_buffer, num_of_columns);
 	    } else {
-	        ei_x_encode_list_header(&dynamic_buffer(state), num_of_columns);
+	        ei_x_encode_list_header(&rows_buffer, num_of_columns);
 	    }
             for (c = 0; c < num_of_columns; c++) {
                 encode_column_dyn(columns(state)[c], c, state);
             }
             if(!tuple_row(state)) {
-                ei_x_encode_empty_list(&dynamic_buffer(state));
+                ei_x_encode_empty_list(&rows_buffer);
             }
 	}
     } 
+    // TODO:
+    // - this seems like it needs to dynamically encode the list size instead of always setting it to 1
+    // - how would this be possible?
+    // - seems like it would need to only start writing the final values at the end of collecting everything?
+    // - could it use 2 ei_x_buff???
+    // - ei_x_append/2 - https://github.com/erlang/otp/blob/master/lib/erl_interface/include/ei.h#L614
+    ei_x_encode_list_header(&dynamic_buffer(state), num_rows_fetched);
+    ei_x_append(&dynamic_buffer(state), &rows_buffer);
+    // TODO:
+    // - can I free this here?
+    // ei_x_free(&rows_buffer);
     ei_x_encode_empty_list(&dynamic_buffer(state));
     return msg;
 }
