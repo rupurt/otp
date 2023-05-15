@@ -1466,7 +1466,8 @@ static db_result_msg encode_value_list_scroll(SQLSMALLINT num_of_columns,
 {
     int r, c, j;
     SQLRETURN result;
-    SQLLEN num_rows_fetched = 0;
+    // SQLLEN num_rows_fetched = 0;
+    int num_rows_fetched = 0;
     // ei_x_buff rows_buffer;
     db_result_msg msg;
 
@@ -1484,19 +1485,25 @@ static db_result_msg encode_value_list_scroll(SQLSMALLINT num_of_columns,
 	if((j == 1) && (Orientation == SQL_FETCH_RELATIVE)) {
 	    OffSet = 1;
 	}
+        if(j == 0) {
+            // ei_x_encode_list_header(&dynamic_buffer(state), 1);
+            ei_x_encode_list_header(&dynamic_buffer(state), ROWSET_SIZE);
+        }
 
 	result = SQLFetchScroll(statement_handle(state), Orientation, OffSet);
 	if (result == SQL_NO_DATA) // reached end of result sets
 	{
 	    break;
 	}
-        ei_x_encode_list_header(&dynamic_buffer(state), 1);
 
-        SQLLEN row_set_num_rows_fetched = 0;
-        result = SQLGetStmtAttr(statement_handle(state), SQL_ATTR_ROWS_FETCHED_PTR, &row_set_num_rows_fetched, 0, NULL);
-        num_rows_fetched += row_set_num_rows_fetched;
-        // TODO: ignore the numer of rows fetched for a while so it can compile again
-	for (r = 0; r < 1; r++) {
+        // SQLLEN row_set_num_rows_fetched = 0;
+        // result = SQLGetStmtAttr(statement_handle(state), SQL_ATTR_ROWS_FETCHED_PTR, &row_set_num_rows_fetched, 0, NULL);
+        int row_set_num_rows_fetched = 0;
+        // TODO: hardcode the numer of rows fetched for a while so it can compile again
+        num_rows_fetched += ROWSET_SIZE;
+        // TODO: hardcode the numer of rows fetched for a while so it can compile again
+	for (r = 0; r < ROWSET_SIZE; r++) {
+	// for (r = 0; r < 1; r++) {
 	// for (r = 0; r < row_set_num_rows_fetched; r++) {
 	    if(tuple_row(state)) {
 	        ei_x_encode_tuple_header(&dynamic_buffer(state), num_of_columns);
@@ -1513,8 +1520,8 @@ static db_result_msg encode_value_list_scroll(SQLSMALLINT num_of_columns,
                 // encode_column_dyn_two(columns(state)[c], c, &rows_buffer, state);
             }
             if(!tuple_row(state)) {
-                // ei_x_encode_empty_list(&rows_buffer);
                 ei_x_encode_empty_list(&dynamic_buffer(state));
+                // ei_x_encode_empty_list(&rows_buffer);
             }
 	}
     } 
