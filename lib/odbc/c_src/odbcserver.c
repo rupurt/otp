@@ -1466,6 +1466,7 @@ static db_result_msg encode_value_list_scroll(SQLSMALLINT num_of_columns,
 {
     int r, c, j;
     SQLRETURN result;
+    int row_set_col_idx = 0;
     // SQLLEN num_rows_fetched = 0;
     int num_rows_fetched = 0;
     // ei_x_buff rows_buffer;
@@ -1513,11 +1514,13 @@ static db_result_msg encode_value_list_scroll(SQLSMALLINT num_of_columns,
 	        // ei_x_encode_list_header(&rows_buffer, num_of_columns);
 	    }
             for (c = 0; c < num_of_columns; c++) {
+                row_set_col_idx = (r * num_of_columns) + c;
                 // TODO:
                 // - this needs to take a buffer
                 // - currently it's encoding the columns into the dynamic buffer...
-                encode_column_dyn(columns(state)[c], c, state);
-                // encode_column_dyn_two(columns(state)[c], c, &rows_buffer, state);
+                // encode_column_dyn(columns(state)[c], c, state);
+                encode_column_dyn(columns(state)[row_set_col_idx], row_set_col_idx, state);
+                // encode_column_dyn_two(columns(state)[row_set_col_idx], row_set_col_idx, &rows_buffer, state);
             }
             if(!tuple_row(state)) {
                 ei_x_encode_empty_list(&dynamic_buffer(state));
