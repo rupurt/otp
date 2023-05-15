@@ -1467,11 +1467,11 @@ static db_result_msg encode_value_list_scroll(SQLSMALLINT num_of_columns,
     int r, c, j;
     SQLRETURN result;
     SQLLEN num_rows_fetched = 0;
-    ei_x_buff rows_buffer;
+    // ei_x_buff rows_buffer;
     db_result_msg msg;
 
-    ei_x_new(&rows_buffer);
-    ei_x_new_with_version(&rows_buffer);
+    // // ei_x_new(&rows_buffer);
+    // ei_x_new_with_version(&rows_buffer);
 
     msg = encode_empty_message();
     
@@ -1490,26 +1490,31 @@ static db_result_msg encode_value_list_scroll(SQLSMALLINT num_of_columns,
 	{
 	    break;
 	}
-        // ei_x_encode_list_header(&dynamic_buffer(state), 1);
+        ei_x_encode_list_header(&dynamic_buffer(state), 1);
 
         SQLLEN row_set_num_rows_fetched = 0;
         result = SQLGetStmtAttr(statement_handle(state), SQL_ATTR_ROWS_FETCHED_PTR, &row_set_num_rows_fetched, 0, NULL);
         num_rows_fetched += row_set_num_rows_fetched;
-	for (r = 0; r < row_set_num_rows_fetched; r++) {
+        // TODO: ignore the numer of rows fetched for a while so it can compile again
+	for (r = 0; r < 1; r++) {
+	// for (r = 0; r < row_set_num_rows_fetched; r++) {
 	    if(tuple_row(state)) {
-	        ei_x_encode_tuple_header(&rows_buffer, num_of_columns);
+	        ei_x_encode_tuple_header(&dynamic_buffer(state), num_of_columns);
+	        // ei_x_encode_tuple_header(&rows_buffer, num_of_columns);
 	    } else {
-	        ei_x_encode_list_header(&rows_buffer, num_of_columns);
+	        ei_x_encode_list_header(&dynamic_buffer(state), num_of_columns);
+	        // ei_x_encode_list_header(&rows_buffer, num_of_columns);
 	    }
             for (c = 0; c < num_of_columns; c++) {
                 // TODO:
                 // - this needs to take a buffer
                 // - currently it's encoding the columns into the dynamic buffer...
-                // encode_column_dyn(columns(state)[c], c, state);
-                encode_column_dyn_two(columns(state)[c], c, &rows_buffer, state);
+                encode_column_dyn(columns(state)[c], c, state);
+                // encode_column_dyn_two(columns(state)[c], c, &rows_buffer, state);
             }
             if(!tuple_row(state)) {
-                ei_x_encode_empty_list(&rows_buffer);
+                // ei_x_encode_empty_list(&rows_buffer);
+                ei_x_encode_empty_list(&dynamic_buffer(state));
             }
 	}
     } 
@@ -1519,8 +1524,8 @@ static db_result_msg encode_value_list_scroll(SQLSMALLINT num_of_columns,
     // - seems like it would need to only start writing the final values at the end of collecting everything?
     // - could it use 2 ei_x_buff???
     // - ei_x_append/2 - https://github.com/erlang/otp/blob/master/lib/erl_interface/include/ei.h#L614
-    ei_x_encode_list_header(&dynamic_buffer(state), num_rows_fetched);
-    ei_x_append(&dynamic_buffer(state), &rows_buffer);
+    // ei_x_encode_list_header(&dynamic_buffer(state), num_rows_fetched);
+    // ei_x_append(&dynamic_buffer(state), &rows_buffer);
     // TODO:
     // - can I free this here?
     // ei_x_free(&rows_buffer);
@@ -1566,8 +1571,7 @@ static db_result_msg encode_row_count(SQLINTEGER num_of_rows,
 /* Description: Encodes the a column value into the "ei_x" - dynamic_buffer
    held by the state variable */
 static void encode_column_dyn(db_column column, 
-                              int column_nr,
-			      db_state *state)
+                              int column_nr, db_state *state)
 {
     TIMESTAMP_STRUCT* ts;
     if (column.type.len == 0 ||
