@@ -1470,10 +1470,12 @@ static db_result_msg encode_value_list_scroll(SQLSMALLINT num_of_columns,
     ei_x_buff rows_buffer;
     db_result_msg msg;
 
+    ei_x_new(&rows_buffer);
     ei_x_new_with_version(&rows_buffer);
 
     msg = encode_empty_message();
     
+    // for (j = 0; j < rowsets_to_fetch; j++) {
     for (j = 0; j < N; j++) {
 	if((j > 0) && (Orientation == SQL_FETCH_ABSOLUTE)) {
 	    OffSet++;
@@ -1488,18 +1490,23 @@ static db_result_msg encode_value_list_scroll(SQLSMALLINT num_of_columns,
 	{
 	    break;
 	}
+        // ei_x_encode_list_header(&dynamic_buffer(state), 1);
 
         SQLLEN row_set_num_rows_fetched = 0;
         result = SQLGetStmtAttr(statement_handle(state), SQL_ATTR_ROWS_FETCHED_PTR, &row_set_num_rows_fetched, 0, NULL);
         num_rows_fetched += row_set_num_rows_fetched;
-	for (r = 0; r < num_rows_fetched; r++) {
+	for (r = 0; r < row_set_num_rows_fetched; r++) {
 	    if(tuple_row(state)) {
 	        ei_x_encode_tuple_header(&rows_buffer, num_of_columns);
 	    } else {
 	        ei_x_encode_list_header(&rows_buffer, num_of_columns);
 	    }
             for (c = 0; c < num_of_columns; c++) {
-                encode_column_dyn(columns(state)[c], c, state);
+                // TODO:
+                // - this needs to take a buffer
+                // - currently it's encoding the columns into the dynamic buffer...
+                // encode_column_dyn(columns(state)[c], c, state);
+                encode_column_dyn_two(columns(state)[c], c, &rows_buffer, state);
             }
             if(!tuple_row(state)) {
                 ei_x_encode_empty_list(&rows_buffer);
@@ -1558,7 +1565,8 @@ static db_result_msg encode_row_count(SQLINTEGER num_of_rows,
  
 /* Description: Encodes the a column value into the "ei_x" - dynamic_buffer
    held by the state variable */
-static void encode_column_dyn(db_column column, int column_nr,
+static void encode_column_dyn(db_column column, 
+                              int column_nr,
 			      db_state *state)
 {
     TIMESTAMP_STRUCT* ts;
@@ -1617,6 +1625,65 @@ static void encode_column_dyn(db_column column, int column_nr,
 	    break;
 	}
     } 
+}
+/* TODO:
+ * - to upstream this copy+pasta function needs to be reconciled with the original function and callers
+ */
+static void encode_column_dyn_two(db_column column,
+                              int column_nr,
+                              ei_x_buff *rows_buffer,
+			      db_state *state)
+{
+    TIMESTAMP_STRUCT* ts;
+    if (column.type.len == 0 ||
+	column.type.strlen_or_indptr == SQL_NULL_DATA) {
+	ei_x_encode_atom(rows_buffer, "null");
+    } else {
+	switch(column.type.c) {
+	case SQL_C_TYPE_TIMESTAMP:
+            ts = (TIMESTAMP_STRUCT*)column.buffer;
+            ei_x_encode_tuple_header(rows_buffer, 2);
+            ei_x_encode_tuple_header(rows_buffer, 3);
+            ei_x_encode_ulong(rows_buffer, ts->year);
+            ei_x_encode_ulong(rows_buffer, ts->month);
+            ei_x_encode_ulong(rows_buffer, ts->day);
+            ei_x_encode_tuple_header(rows_buffer, 3);
+            ei_x_encode_ulong(rows_buffer, ts->hour);
+            ei_x_encode_ulong(rows_buffer, ts->minute);
+            ei_x_encode_ulong(rows_buffer, ts->second);
+            break;
+	case SQL_C_CHAR:
+		if binary_strings(state) {
+			ei_x_encode_binary(rows_buffer, column.buffer,column.type.strlen_or_indptr);
+		} else {
+			ei_x_encode_string(rows_buffer, column.buffer);
+		}
+	    break;
+	case SQL_C_WCHAR:
+            ei_x_encode_binary(rows_buffer, column.buffer,column.type.strlen_or_indptr);
+	    break;
+	case SQL_C_SLONG:
+	    ei_x_encode_long(rows_buffer, *(SQLINTEGER*)column.buffer);
+	    break;
+	case SQL_C_DOUBLE:
+	    ei_x_encode_double(rows_buffer, *(double*)column.buffer);
+	    break;
+	case SQL_C_BIT:
+	    ei_x_encode_atom(rows_buffer, column.buffer[0]?"true":"false");
+	    break;
+	case SQL_C_BINARY:
+	    column = retrive_binary_data(column, column_nr, state);
+	    if binary_strings(state) {
+		    ei_x_encode_binary(rows_buffer, column.buffer,column.type.strlen_or_indptr);
+	    } else {
+		    ei_x_encode_string(rows_buffer, (void *)column.buffer);
+	    }
+	    break;
+	default:
+	    ei_x_encode_atom(rows_buffer, "error");
+	    break;
+	}
+    }
 }
 
 static void encode_data_type(SQLSMALLINT sql_type, SQLINTEGER size,
