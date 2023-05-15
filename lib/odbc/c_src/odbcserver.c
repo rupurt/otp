@@ -174,8 +174,8 @@ static db_result_msg encode_value_list_scroll(SQLSMALLINT num_of_columns,
 					      db_state *state);
 static db_result_msg encode_row_count(SQLINTEGER num_of_rows,
 				      db_state *state);
-static void encode_column_dyn(db_column column, int column_nr,
-			      db_state *state);
+static void encode_column_dyn(db_column column, int column_nr, db_state *state);
+static void encode_column_dyn_two(db_column column, int column_nr, ei_x_buff *rows_buffer, db_state *state);
 static void encode_data_type(SQLSMALLINT sql_type, SQLINTEGER size,
 			     SQLSMALLINT decimal_digits, db_state *state);
 static Boolean decode_params(db_state *state, char *buffer, int *index, param_array **params,
@@ -213,6 +213,7 @@ static void clean_socket_lib(void);
 static void * safe_malloc(int size);
 static void * safe_realloc(void * ptr, int size);
 static db_column * alloc_column_buffer(int n);
+static db_column * alloc_column_buffer_two(int num_of_rows, int num_cols_in_row);
 static void free_column_buffer(db_column **columns, int n);
 static void free_params(param_array **params, int cols);
 static void clean_state(db_state *state);
@@ -781,15 +782,21 @@ static db_result_msg db_select_count(byte *sql, db_state *state)
                   (SQLPOINTER)ROWSET_SIZE,
                   (SQLINTEGER)0);
   
-    if(!sql_success(SQLNumResultCols(statement_handle(state),
-				     &num_of_columns)))
+    if(!sql_success(SQLNumResultCols(statement_handle(state), &num_of_columns))) {
 	DO_EXIT(EXIT_COLS);
+    }
 
     nr_of_columns(state) = (int)num_of_columns;
-    columns(state) = alloc_column_buffer(nr_of_columns(state));
+    // columns(state) = alloc_column_buffer(nr_of_columns(state));
   
-    if(!sql_success(SQLRowCount(statement_handle(state), &num_of_rows)))
+    if(!sql_success(SQLRowCount(statement_handle(state), &num_of_rows))) {
 	DO_EXIT(EXIT_ROWS);
+    }
+    // TODO:
+    // - pretty sure we need to allocate a slab of memory for all columns of all rows in the row set
+    // - I also think this needs to be done in db_select. We should only need to allocate memory for the columns that are being fetched in all row sets. Not all columns in the whole result
+    // columns(state) = alloc_column_buffer_two(num_of_rows, nr_of_columns(state));
+    columns(state) = alloc_column_buffer_two(ROWSET_SIZE, nr_of_columns(state));
   
     return encode_row_count(num_of_rows, state);
 }
@@ -861,6 +868,12 @@ static db_result_msg db_select(byte *args, db_state *state)
 				       (SQLINTEGER)offset,
 				       n, state);
     }
+
+    // TODO:
+    // - when is the statement handle closed?
+    // - is it ever closed in the current implementation of db_select_count/db_select?
+    // - how is it different to db_query?
+    // - seems like it could be a source of memory leaks
   
     if (msg.length != 0) { /* An error has occurred */
 	ei_x_free(&(dynamic_buffer(state))); 
@@ -1644,9 +1657,9 @@ static void encode_column_dyn(db_column column,
  * - to upstream this copy+pasta function needs to be reconciled with the original function and callers
  */
 static void encode_column_dyn_two(db_column column,
-                              int column_nr,
-                              ei_x_buff *rows_buffer,
-			      db_state *state)
+                                  int column_nr,
+                                  ei_x_buff *rows_buffer,
+			          db_state *state)
 {
     TIMESTAMP_STRUCT* ts;
     if (column.type.len == 0 ||
@@ -2252,6 +2265,21 @@ static db_column * alloc_column_buffer(int n)
     columns = (db_column *)safe_malloc(n * sizeof(db_column));
     for(i = 0; i < n; i++)
 	columns[i].buffer = NULL;
+  
+    return columns;
+}
+// TODO:
+// - reconcile this with the original function call
+static db_column * alloc_column_buffer_two(int num_of_rows, int num_cols_in_row)
+{
+    int i;
+    int num_of_cols_in_all_rows = num_of_rows * num_cols_in_row;
+    db_column *columns;
+  
+    columns = (db_column *)safe_malloc(num_of_cols_in_all_rows * sizeof(db_column));
+    for(i = 0; i < num_of_cols_in_all_rows; i++) {
+	columns[i].buffer = NULL;
+    }
   
     return columns;
 }
