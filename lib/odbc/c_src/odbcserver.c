@@ -263,6 +263,8 @@ static int log_scroll_fetch_encode_row(const int row_idx);
 static int log_scroll_fetch_after_encoded_row_header(const int row_idx, const int num_of_cols);
 static int log_scroll_fetch_rowset_col_idx(const int row_idx, const int col_idx, const int rowset_col_idx);
 static int log_encode_column_dyn_column_type(const char *col_type);
+static int log_scroll_fetch_after_encode_column_dyn(const int row_idx, const int col_idx);
+static int log_scroll_fetch_after_encoded_row(const int row_idx);
 
 /* ----------------------------- CODE ------------------------------------*/
 
@@ -1551,11 +1553,13 @@ static db_result_msg encode_value_list_scroll(SQLSMALLINT num_of_columns,
                 encode_column_dyn(columns(state)[c], c, state);
                 // encode_column_dyn(columns(state)[rowset_col_idx], rowset_col_idx, state);
                 // encode_column_dyn_two(columns(state)[rowset_col_idx], rowset_col_idx, &rows_buffer, state);
+                log_scroll_fetch_after_encode_column_dyn(r, c);
             }
             if(!tuple_row(state)) {
                 ei_x_encode_empty_list(&dynamic_buffer(state));
                 // ei_x_encode_empty_list(&rows_buffer);
             }
+            log_scroll_fetch_after_encoded_row(r);
 	}
     } 
     // TODO:
@@ -3107,6 +3111,44 @@ static int log_encode_column_dyn_column_type(const char *col_type) {
 
     // Append the string to the file
     fprintf(file, "fetch scroll rowset col idx - row_idx=%s\n", col_type);
+
+    // Close the file
+    fclose(file);
+
+    return 0;
+}
+
+static int log_scroll_fetch_after_encode_column_dyn(const int row_idx, const int col_idx) {
+    // Open the file with append mode ("a")
+    FILE *file = fopen("/tmp/odbc.log", "a");
+
+    // Check if the file was opened successfully
+    if (file == NULL) {
+        perror("Error: Unable to open the file.");
+        return 1;
+    }
+
+    // Append the string to the file
+    fprintf(file, "fetch scroll after encode column dyn - row_idx=%d, col_idx=%d\n", row_idx, col_idx);
+
+    // Close the file
+    fclose(file);
+
+    return 0;
+}
+
+static int log_scroll_fetch_after_encoded_row(const int row_idx) {
+    // Open the file with append mode ("a")
+    FILE *file = fopen("/tmp/odbc.log", "a");
+
+    // Check if the file was opened successfully
+    if (file == NULL) {
+        perror("Error: Unable to open the file.");
+        return 1;
+    }
+
+    // Append the string to the file
+    fprintf(file, "fetch scroll after encoded row - row_idx=%d\n", row_idx);
 
     // Close the file
     fclose(file);
