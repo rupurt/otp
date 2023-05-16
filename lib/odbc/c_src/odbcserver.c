@@ -1509,14 +1509,14 @@ static db_result_msg encode_value_list_scroll(SQLSMALLINT num_of_columns,
             ei_x_encode_list_header(&dynamic_buffer(state), ROWSET_SIZE);
         }
 
+        SQLLEN rowset_num_rows_fetched = 0;
+        result = SQLSetStmtAttr(statement_handle(state), SQL_ATTR_ROWS_FETCHED_PTR, &rowset_num_rows_fetched, 0);
 	result = SQLFetchScroll(statement_handle(state), Orientation, OffSet);
 	if (result == SQL_NO_DATA) // reached end of result sets
 	{
 	    break;
 	}
 
-        SQLLEN rowset_num_rows_fetched = 0;
-        result = SQLGetStmtAttr(statement_handle(state), SQL_ATTR_ROWS_FETCHED_PTR, &rowset_num_rows_fetched, 0, NULL);
         log_rowset_num_rows_fetched((int)rowset_num_rows_fetched);
         num_rows_fetched += (int)rowset_num_rows_fetched;
         // TODO: hardcode the numer of rows fetched for a while so it can compile again
