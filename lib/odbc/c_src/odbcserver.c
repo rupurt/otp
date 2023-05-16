@@ -152,6 +152,9 @@ static db_result_msg db_select(byte *args, db_state *state);
 static db_result_msg db_param_query(byte *buffer, db_state *state);
 static db_result_msg db_describe_table(byte *sql, db_state *state);
 
+/* ------------- Result Set functions -------- ------------------------*/
+static int get_result_set_column_descriptions(SQLSMALLINT num_of_columns, db_state *state);
+
 /* ------------- Encode/decode functions -------- ------------------------*/
 
 static db_result_msg encode_empty_message(void);
@@ -174,8 +177,8 @@ static db_result_msg encode_value_list_scroll(SQLSMALLINT num_of_columns,
 					      db_state *state);
 static db_result_msg encode_row_count(SQLINTEGER num_of_rows,
 				      db_state *state);
-static void encode_column_dyn(db_column column, int column_nr,
-			      db_state *state);
+static void encode_column_dyn(db_column column, int column_nr, db_state *state);
+static void encode_column_dyn_two(db_column column, int column_nr, ei_x_buff *rows_buffer, db_state *state);
 static void encode_data_type(SQLSMALLINT sql_type, SQLINTEGER size,
 			     SQLSMALLINT decimal_digits, db_state *state);
 static Boolean decode_params(db_state *state, char *buffer, int *index, param_array **params,
@@ -213,7 +216,11 @@ static void clean_socket_lib(void);
 static void * safe_malloc(int size);
 static void * safe_realloc(void * ptr, int size);
 static db_column * alloc_column_buffer(int n);
+static db_column_description * alloc_result_set_column_descriptions(int num_of_cols);
+static db_column_binding * alloc_rowset_column_bindings(int rowset_size, int num_cols_in_row);
 static void free_column_buffer(db_column **columns, int n);
+static void free_result_set_column_descriptions(db_column_description **column_descriptions, int num_cols_in_row);
+static void free_rowset_column_bindings(db_column_binding **column_bindings, int rowset_size, int num_cols_in_row);
 static void free_params(param_array **params, int cols);
 static void clean_state(db_state *state);
 static SQLLEN* alloc_strlen_indptr(int n, int val);
@@ -255,6 +262,15 @@ static diagnos get_diagnos(SQLSMALLINT handleType, SQLHANDLE handle, Boolean ext
 static db_result_msg more_result_sets(db_state *state);
 static Boolean sql_success(SQLRETURN result);
 static void str_tolower(char *str, int len);
+
+static int log(const char *str);
+static int log_rowset_num_rows_fetched(const int rows_fetched);
+static int log_scroll_fetch_encode_row(const int row_idx);
+static int log_scroll_fetch_after_encoded_row_header(const int row_idx, const int num_of_cols);
+static int log_scroll_fetch_rowset_col_idx(const int row_idx, const int col_idx, const int rowset_col_idx);
+static int log_encode_column_dyn_column_type(const char *col_type);
+static int log_scroll_fetch_after_encode_column_dyn(const int row_idx, const int col_idx);
+static int log_scroll_fetch_after_encoded_row(const int row_idx);
 
 /* ----------------------------- CODE ------------------------------------*/
 
@@ -724,7 +740,40 @@ static db_result_msg db_select_count(byte *sql, db_state *state)
 	   cursors, this is expected and will not cause any damage*/
 	SQLSetStmtAttr(statement_handle(state),
 		       (SQLINTEGER)SQL_ATTR_CURSOR_SCROLLABLE,
-		       (SQLPOINTER)SQL_SCROLLABLE, (SQLINTEGER)0);
+		       (SQLPOINTER)SQL_SCROLLABLE,
+                       (SQLINTEGER)0);
+        // /* Db2 requires cursor sensitivity to be set to support scrollable
+        //  * cursors. By default it is = SQL_UNSPECIFIED  */
+        // SQLSetStmtAttr(statement_handle(state),
+        //               (SQLINTEGER)SQL_ATTR_CURSOR_SENSITIVITY,
+        //               (SQLPOINTER)SQL_SENSITIVE,
+        //               (SQLINTEGER)0);
+        // /* Db2 z/OS & SQLServer do not support scrollable cursors as
+        //  * SQL_CURSOR_FORWARD_ONLY. Ideally we would also support passing
+        //  * `SQL_ATTR_CURSOR_TYPE` as an argument so that we can also support
+        //  * `SQL_CURSOR_TYPE_STATIC`.
+        //  * - https://www.ibm.com/docs/en/db2-for-zos/11?topic=odbc-scrollable-cursor-characteristics-in-db2
+        //  * - https://learn.microsoft.com/en-us/sql/odbc/reference/develop-app/cursor-characteristics-and-cursor-type?view=sql-server-ver16 */
+        // SQLSetStmtAttr(statement_handle(state),
+        //               (SQLINTEGER)SQL_ATTR_CURSOR_TYPE,
+        //               (SQLPOINTER)SQL_CURSOR_DYNAMIC,
+        //               (SQLINTEGER)0);
+        /* Db2 z/OS & SQLServer do not support scrollable cursors as
+         * SQL_CURSOR_FORWARD_ONLY. Ideally we would also support passing
+         * `SQL_ATTR_CURSOR_TYPE` as an argument so that we can also support
+         * `SQL_CURSOR_TYPE_DYNAMIC`.
+         * - https://www.ibm.com/docs/en/db2-for-zos/11?topic=odbc-scrollable-cursor-characteristics-in-db2
+         * - https://learn.microsoft.com/en-us/sql/odbc/reference/develop-app/cursor-characteristics-and-cursor-type?view=sql-server-ver16 */
+        /* Db2 requires cursor sensitivity to be set to support scrollable
+         * cursors. By default it is = SQL_UNSPECIFIED  */
+        SQLSetStmtAttr(statement_handle(state),
+                      (SQLINTEGER)SQL_ATTR_CURSOR_SENSITIVITY,
+                      (SQLPOINTER)SQL_INSENSITIVE,
+                      (SQLINTEGER)0);
+        SQLSetStmtAttr(statement_handle(state),
+                      (SQLINTEGER)SQL_ATTR_CURSOR_TYPE,
+                      (SQLPOINTER)SQL_CURSOR_STATIC,
+                      (SQLINTEGER)0);
     }
     
     if(!sql_success(SQLExecDirect(statement_handle(state), (SQLCHAR *)sql, SQL_NTS))) {
@@ -734,16 +783,19 @@ static db_result_msg db_select_count(byte *sql, db_state *state)
                                     extended_error(state, diagnos.sqlState),
                                     diagnos.nativeError);
     }
-  
-    if(!sql_success(SQLNumResultCols(statement_handle(state),
-				     &num_of_columns)))
-	DO_EXIT(EXIT_COLS);
 
+    if(!sql_success(SQLNumResultCols(statement_handle(state), &num_of_columns))) {
+	DO_EXIT(EXIT_COLS);
+    }
+    // Allocate and memoize column descriptors for N fetches
     nr_of_columns(state) = (int)num_of_columns;
-    columns(state) = alloc_column_buffer(nr_of_columns(state));
+    // columns(state) = alloc_column_buffer(nr_of_columns(state));
+    column_descriptions(state) = alloc_result_set_column_descriptions(num_of_columns);
+    get_result_set_column_descriptions(num_of_columns, state);
   
-    if(!sql_success(SQLRowCount(statement_handle(state), &num_of_rows)))
+    if(!sql_success(SQLRowCount(statement_handle(state), &num_of_rows))) {
 	DO_EXIT(EXIT_ROWS);
+    }
   
     return encode_row_count(num_of_rows, state);
 }
@@ -808,13 +860,32 @@ static db_result_msg db_select(byte *args, db_state *state)
     ei_x_encode_atom(&dynamic_buffer(state), "selected");
 
     num_of_columns = nr_of_columns(state);
-    msg = encode_column_name_list(num_of_columns, state);
+    // TODO:
+    // - this column buffer allocation was moved from db_select_count
+    // - ideally this should be split in 2
+    //   * column_descriptions
+    //   * column_bindings
+    // - it should allocate and hydrate column_descriptions in db_select_count
+    // - it should allocate and hydrate column_bindings in db_select
+    // columns(state) = alloc_column_buffer(nr_of_columns(state));
+    // columns(state) = alloc_column_buffer(num_of_columns);
+    // msg = encode_column_name_list(num_of_columns, state);
+    msg = encode_column_descriptors(num_of_columns, state);
+    // TODO:
+    // - this free column buffer is new
+    // free_column_buffer(&(columns(state)), num_of_columns);
     if (msg.length == 0) { /* If no error has occurred */   
 	msg = encode_value_list_scroll(num_of_columns,
 				       (SQLSMALLINT)orientation,
 				       (SQLINTEGER)offset,
 				       n, state);
     }
+
+    // TODO:
+    // - when is the statement handle closed?
+    // - is it ever closed in the current implementation of db_select_count/db_select?
+    // - how is it different to db_query?
+    // - seems like it could be a source of memory leaks
   
     if (msg.length != 0) { /* An error has occurred */
 	ei_x_free(&(dynamic_buffer(state))); 
@@ -1285,6 +1356,41 @@ static int num_out_params(int num_of_params, param_array* params)
     return ret;
 }
 
+/* Description: Gets the descriptor information about the columns in the result set
+ * and assigns them to the buffer held by the state variable */
+static int get_result_set_column_descriptions(SQLSMALLINT num_of_columns,
+					      db_state *state)
+{
+    SQLRESULT result;
+    SQLULEN size;
+    SQLSMALLINT sql_type;
+    int i;
+
+    for (i = 0; i < num_of_columns; ++i) {
+	result = SQLDescribeCol(statement_handle(state),
+			        (SQLSMALLINT)(i+1),
+                                column_descriptions(state)[i].name,
+                                sizeof(column_descriptions(state)[i].name),
+                                column_descriptions(state)[i].name_len,
+                                &sql_type,
+                                &size,
+                                column_descriptions(state)[i].decimal_digits,
+				column_descriptions(state)[i].nullable));
+
+	if(sql_success(result)) {
+	    if(sql_type == SQL_LONGVARCHAR || sql_type == SQL_LONGVARBINARY || sql_type == SQL_WLONGVARCHAR) {
+	        size = MAXCOLSIZE;
+            }
+            column_descriptions(state)[i].col_size = size;
+            column_descriptions(state)[i].sql_type = sql_type;
+        } else {
+	    DO_EXIT(EXIT_DESC);
+        }
+    }
+
+    return 0;
+}
+
 /* Description: Encodes the result set into the "ei_x" - dynamic_buffer
    held by the state variable */
 static db_result_msg encode_result_set(SQLSMALLINT num_of_columns,
@@ -1370,6 +1476,13 @@ static db_result_msg encode_column_name_list(SQLSMALLINT num_of_columns,
     return msg;
 }
 
+/* Description: TODO... */
+static db_result_msg encode_column_descriptors(SQLSMALLINT num_of_columns,
+					       db_state *state)
+{
+    // TODO: implement
+}
+
 /* Description: Encodes the list(s) of row values fetched by SQLFetch into
    the "ei_x" - dynamic_buffer held by the state variable */
 static db_result_msg encode_value_list(SQLSMALLINT num_of_columns,
@@ -1384,7 +1497,6 @@ static db_result_msg encode_value_list(SQLSMALLINT num_of_columns,
     for (;;) {
 	/* fetch the next row */
 	result = SQLFetch(statement_handle(state)); 
-    
 	if (result == SQL_NO_DATA) /* Reached end of result set */
 	{
 	    break;
@@ -1392,20 +1504,20 @@ static db_result_msg encode_value_list(SQLSMALLINT num_of_columns,
 
 	ei_x_encode_list_header(&dynamic_buffer(state), 1);
 
-	if(tuple_row(state)) {
-	    ei_x_encode_tuple_header(&dynamic_buffer(state),
-				     num_of_columns);
-	} else {
-	    ei_x_encode_list_header(&dynamic_buffer(state), num_of_columns);
-	}
-    
-	for (i = 0; i < num_of_columns; i++) {
-	    encode_column_dyn(columns(state)[i], i, state);
-	}
+        if(tuple_row(state)) {
+            ei_x_encode_tuple_header(&dynamic_buffer(state),
+                                     num_of_columns);
+        } else {
+            ei_x_encode_list_header(&dynamic_buffer(state), num_of_columns);
+        }
 
-	if(!tuple_row(state)) {
-	    ei_x_encode_empty_list(&dynamic_buffer(state));
-	}
+        for (i = 0; i < num_of_columns; i++) {
+            encode_column_dyn(columns(state)[i], i, state);
+        }
+
+        if(!tuple_row(state)) {
+            ei_x_encode_empty_list(&dynamic_buffer(state));
+        }
     } 
     ei_x_encode_empty_list(&dynamic_buffer(state));
     return msg;
@@ -1419,12 +1531,36 @@ static db_result_msg encode_value_list_scroll(SQLSMALLINT num_of_columns,
 					      SQLINTEGER OffSet, int N,
 					      db_state *state)
 {
-    int i, j;
     SQLRETURN result;
+    // TODO:
+    // - pass this in as an argument with a default value
+    int rowset_size = ROWSET_SIZE;
+    int result_num_rows_fetched = 0;
+    SQLLEN rowset_num_rows_fetched = 0;
+    int rowset_col_idx = 0;
+    int r, c, j;
+    // ei_x_buff rows_buffer;
     db_result_msg msg;
 
+
+    // nr_of_columns(state) = (int)num_of_columns;
+    // columns(state) = alloc_column_buffer(nr_of_columns(state));
+
+    // // ei_x_new(&rows_buffer);
+    // ei_x_new_with_version(&rows_buffer);
+
     msg = encode_empty_message();
+    result = SQLSetStmtAttr(statement_handle(state), (SQLINTEGER)SQL_ATTR_ROW_ARRAY_SIZE, (SQLPOINTER)rowset_size, 0);
+    if (result == SQL_ERROR)
+    {
+        return msg;
+    }
+
+    // TODO:
+    // - this rowset column buffer allocation is new
+    columns(state) = alloc_rowset_column_bindings(rowset_size, num_of_columns);
     
+    // for (j = 0; j < rowsets_to_fetch; j++) {
     for (j = 0; j < N; j++) {
 	if((j > 0) && (Orientation == SQL_FETCH_ABSOLUTE)) {
 	    OffSet++;
@@ -1434,28 +1570,70 @@ static db_result_msg encode_value_list_scroll(SQLSMALLINT num_of_columns,
 	    OffSet = 1;
 	}
 
-	result = SQLFetchScroll(statement_handle(state), Orientation,
-				OffSet); 
-    
-	if (result == SQL_NO_DATA) /* Reached end of result set */
+        result = SQLSetStmtAttr(statement_handle(state), SQL_ATTR_ROWS_FETCHED_PTR, &rowset_num_rows_fetched, 0);
+	if (result == SQL_ERROR)
 	{
 	    break;
 	}
-	ei_x_encode_list_header(&dynamic_buffer(state), 1);
+	result = SQLFetchScroll(statement_handle(state), Orientation, OffSet);
+	if (result == SQL_NO_DATA) // reached end of result sets
+	{
+	    break;
+	}
+        if(j == 0) {
+            // ei_x_encode_list_header(&dynamic_buffer(state), 1);
+            ei_x_encode_list_header(&dynamic_buffer(state), (int)rowset_num_rows_fetched);
+        }
 
-	if(tuple_row(state)) {
-	    ei_x_encode_tuple_header(&dynamic_buffer(state),
-				     num_of_columns);
-	} else {
-	    ei_x_encode_list_header(&dynamic_buffer(state), num_of_columns);
-	}
-	for (i = 0; i < num_of_columns; i++) {
-	    encode_column_dyn(columns(state)[i], i, state);
-	}
-	if(!tuple_row(state)) {
-	    ei_x_encode_empty_list(&dynamic_buffer(state));
+        log_rowset_num_rows_fetched((int)rowset_num_rows_fetched);
+        result_num_rows_fetched += (int)rowset_num_rows_fetched;
+        // TODO: hardcode the numer of rows fetched for a while so it can compile again
+        // int rowset_num_rows_fetched = 0;
+        // result_num_rows_fetched += ROWSET_SIZE;
+	// for (r = 0; r < ROWSET_SIZE; r++) {
+	// for (r = 0; r < 1; r++) {
+	for (r = 0; r < (int)rowset_num_rows_fetched; r++) {
+            log_scroll_fetch_encode_row(r);
+	    if(tuple_row(state)) {
+	        ei_x_encode_tuple_header(&dynamic_buffer(state), num_of_columns);
+	        // ei_x_encode_tuple_header(&rows_buffer, num_of_columns);
+	    } else {
+	        ei_x_encode_list_header(&dynamic_buffer(state), num_of_columns);
+	        // ei_x_encode_list_header(&rows_buffer, num_of_columns);
+	    }
+            log_scroll_fetch_after_encoded_row_header(r, num_of_columns);
+            for (c = 0; c < num_of_columns; c++) {
+                rowset_col_idx = (r * num_of_columns) + c;
+                log_scroll_fetch_rowset_col_idx(r, c, rowset_col_idx);
+                // TODO:
+                // - this needs to take a buffer
+                // - currently it's encoding the columns into the dynamic buffer...
+                encode_column_dyn(columns(state)[c], c, state);
+                // encode_column_dyn(columns(state)[rowset_col_idx], rowset_col_idx, state);
+                // encode_column_dyn_two(columns(state)[rowset_col_idx], rowset_col_idx, &rows_buffer, state);
+                log_scroll_fetch_after_encode_column_dyn(r, c);
+            }
+            if(!tuple_row(state)) {
+                ei_x_encode_empty_list(&dynamic_buffer(state));
+                // ei_x_encode_empty_list(&rows_buffer);
+            }
+            log_scroll_fetch_after_encoded_row(r);
 	}
     } 
+    // TODO:
+    // - this rowset column buffer free is new
+    free_rowset_column_bindings(&(columns(state)), rowset_size, num_of_columns);
+    // TODO:
+    // - this seems like it needs to dynamically encode the list size instead of always setting it to 1
+    // - how would this be possible?
+    // - seems like it would need to only start writing the final values at the end of collecting everything?
+    // - could it use 2 ei_x_buff???
+    // - ei_x_append/2 - https://github.com/erlang/otp/blob/master/lib/erl_interface/include/ei.h#L614
+    // ei_x_encode_list_header(&dynamic_buffer(state), result_num_rows_fetched);
+    // ei_x_append(&dynamic_buffer(state), &rows_buffer);
+    // TODO:
+    // - can I free this here?
+    // ei_x_free(&rows_buffer);
     ei_x_encode_empty_list(&dynamic_buffer(state));
     return msg;
 }
@@ -1497,16 +1675,18 @@ static db_result_msg encode_row_count(SQLINTEGER num_of_rows,
  
 /* Description: Encodes the a column value into the "ei_x" - dynamic_buffer
    held by the state variable */
-static void encode_column_dyn(db_column column, int column_nr,
-			      db_state *state)
+static void encode_column_dyn(db_column column, 
+                              int column_nr, db_state *state)
 {
     TIMESTAMP_STRUCT* ts;
     if (column.type.len == 0 ||
 	column.type.strlen_or_indptr == SQL_NULL_DATA) {
+        log_encode_column_dyn_column_type("SQL_NULL_DATA");
 	ei_x_encode_atom(&dynamic_buffer(state), "null");
     } else {
 	switch(column.type.c) {
 	case SQL_C_TYPE_TIMESTAMP:
+            log_encode_column_dyn_column_type("SQL_C_TYPE_TIMESTAMP");
             ts = (TIMESTAMP_STRUCT*)column.buffer;
             ei_x_encode_tuple_header(&dynamic_buffer(state), 2);
             ei_x_encode_tuple_header(&dynamic_buffer(state), 3);
@@ -1519,6 +1699,7 @@ static void encode_column_dyn(db_column column, int column_nr,
             ei_x_encode_ulong(&dynamic_buffer(state), ts->second);
             break;
 	case SQL_C_CHAR:
+                log_encode_column_dyn_column_type("SQL_C_CHAR");
 		if binary_strings(state) {
 			 ei_x_encode_binary(&dynamic_buffer(state), 
 					    column.buffer,column.type.strlen_or_indptr);
@@ -1527,22 +1708,27 @@ static void encode_column_dyn(db_column column, int column_nr,
 		}
 	    break;
 	case SQL_C_WCHAR:
+            log_encode_column_dyn_column_type("SQL_C_WCHAR");
             ei_x_encode_binary(&dynamic_buffer(state), 
                                column.buffer,column.type.strlen_or_indptr);
 	    break;
 	case SQL_C_SLONG:
+            log_encode_column_dyn_column_type("SQL_C_SLONG");
 	    ei_x_encode_long(&dynamic_buffer(state),
 	    	*(SQLINTEGER*)column.buffer);
 	    break;
 	case SQL_C_DOUBLE:
+            log_encode_column_dyn_column_type("SQL_C_DOUBLE");
 	    ei_x_encode_double(&dynamic_buffer(state),
 			       *(double*)column.buffer);
 	    break;
 	case SQL_C_BIT:
+            log_encode_column_dyn_column_type("SQL_C_BIT");
 	    ei_x_encode_atom(&dynamic_buffer(state),
 			     column.buffer[0]?"true":"false");
 	    break;
 	case SQL_C_BINARY:		
+            log_encode_column_dyn_column_type("SQL_C_BINARY");
 	    column = retrive_binary_data(column, column_nr, state);
 	    if binary_strings(state) {
 		    ei_x_encode_binary(&dynamic_buffer(state), 
@@ -1552,10 +1738,70 @@ static void encode_column_dyn(db_column column, int column_nr,
 	    }
 	    break;
 	default:
+            log_encode_column_dyn_column_type("default case");
 	    ei_x_encode_atom(&dynamic_buffer(state), "error");
 	    break;
 	}
     } 
+}
+/* TODO:
+ * - to upstream this copy+pasta function needs to be reconciled with the original function and callers
+ */
+static void encode_column_dyn_two(db_column column,
+                                  int column_nr,
+                                  ei_x_buff *rows_buffer,
+			          db_state *state)
+{
+    TIMESTAMP_STRUCT* ts;
+    if (column.type.len == 0 ||
+	column.type.strlen_or_indptr == SQL_NULL_DATA) {
+	ei_x_encode_atom(rows_buffer, "null");
+    } else {
+	switch(column.type.c) {
+	case SQL_C_TYPE_TIMESTAMP:
+            ts = (TIMESTAMP_STRUCT*)column.buffer;
+            ei_x_encode_tuple_header(rows_buffer, 2);
+            ei_x_encode_tuple_header(rows_buffer, 3);
+            ei_x_encode_ulong(rows_buffer, ts->year);
+            ei_x_encode_ulong(rows_buffer, ts->month);
+            ei_x_encode_ulong(rows_buffer, ts->day);
+            ei_x_encode_tuple_header(rows_buffer, 3);
+            ei_x_encode_ulong(rows_buffer, ts->hour);
+            ei_x_encode_ulong(rows_buffer, ts->minute);
+            ei_x_encode_ulong(rows_buffer, ts->second);
+            break;
+	case SQL_C_CHAR:
+		if binary_strings(state) {
+			ei_x_encode_binary(rows_buffer, column.buffer,column.type.strlen_or_indptr);
+		} else {
+			ei_x_encode_string(rows_buffer, column.buffer);
+		}
+	    break;
+	case SQL_C_WCHAR:
+            ei_x_encode_binary(rows_buffer, column.buffer,column.type.strlen_or_indptr);
+	    break;
+	case SQL_C_SLONG:
+	    ei_x_encode_long(rows_buffer, *(SQLINTEGER*)column.buffer);
+	    break;
+	case SQL_C_DOUBLE:
+	    ei_x_encode_double(rows_buffer, *(double*)column.buffer);
+	    break;
+	case SQL_C_BIT:
+	    ei_x_encode_atom(rows_buffer, column.buffer[0]?"true":"false");
+	    break;
+	case SQL_C_BINARY:
+	    column = retrive_binary_data(column, column_nr, state);
+	    if binary_strings(state) {
+		    ei_x_encode_binary(rows_buffer, column.buffer,column.type.strlen_or_indptr);
+	    } else {
+		    ei_x_encode_string(rows_buffer, (void *)column.buffer);
+	    }
+	    break;
+	default:
+	    ei_x_encode_atom(rows_buffer, "error");
+	    break;
+	}
+    }
 }
 
 static void encode_data_type(SQLSMALLINT sql_type, SQLINTEGER size,
@@ -2113,6 +2359,35 @@ static db_column * alloc_column_buffer(int n)
   
     return columns;
 }
+
+/* Description: Allocate memory for n column descriptions of a single row in a result set */
+static db_column_description * alloc_result_set_column_descriptions(int num_of_cols)
+{
+    int i;
+    db_column_description *column_descriptions;
+  
+    column_descriptions = (db_column_description *)safe_malloc(n * sizeof(db_column_description));
+    for(i = 0; i < num_of_cols; i++) {
+	column_descriptions[i].buffer = NULL;
+    }
+  
+    return column_descriptions;
+}
+
+/* Description: Allocate memory for n columns in a rowset */
+static db_column_binding * alloc_rowset_column_bindings(int rowset_size, int num_cols_in_row)
+{
+    int num_cols_in_rowset = rowset_size * num_cols_in_row;
+    int i;
+    db_column_binding *column_bindings;
+
+    column_bindings = (db_column_binding *)safe_malloc(num_cols_in_rowset * sizeof(db_column_binding));
+    for(i = 0; i < num_cols_in_rowset; i++) {
+	column_bindings[i].buffer = NULL;
+    }
+
+    return column_bindings;
+}
  
 /* Description: Deallocate memory allocated by alloc_column_buffer */
 static void free_column_buffer(db_column **columns, int n)
@@ -2126,6 +2401,36 @@ static void free_column_buffer(db_column **columns, int n)
 	}
 	free(*columns);
 	*columns = NULL;
+    }
+}
+
+/* Description: Deallocate memory allocated by alloc_result_set_column_descriptions */
+static void free_result_set_column_descriptions(db_column_description **column_descriptions, int num_cols_in_row)
+{
+    int i;
+    if(*column_descriptions != NULL) {
+	for (i = 0; i < num_cols_in_row; i++) {
+            if((*column_descriptions)[i].buffer != NULL) {
+                free((*column_descriptions)[i].buffer);
+            }
+	}
+	free(*column_descriptions);
+	*column_descriptions = NULL;
+    }
+}
+
+/* Description: Deallocate memory allocated by alloc_rowset_column_bindings */
+static void free_rowset_column_bindings(db_column_binding **column_bindings, int rowset_size, int num_cols_in_row)
+{
+    int i;
+    if(*column_bindings != NULL) {
+	for (i = 0; i < rowset_size * num_cols_in_row; i++) {
+            if((*column_bindings)[i].buffer != NULL) {
+                free((*column_bindings)[i].buffer);
+            }
+	}
+	free(*column_bindings);
+	*column_bindings = NULL;
     }
 }
 
@@ -2802,4 +3107,156 @@ static void str_tolower(char *str, int len)
 	for(i = 0; i <= len; i++) {
 		str[i] = tolower(str[i]);
 	}
+}
+
+static int log(const char *str) {
+    // Open the file with append mode ("a")
+    FILE *file = fopen("/tmp/odbc.log", "a");
+
+    // Check if the file was opened successfully
+    if (file == NULL) {
+        perror("Error: Unable to open the file.");
+        return 1;
+    }
+
+    // Append the string to the file
+    fprintf(file, "%s\n", str);
+
+    // Close the file
+    fclose(file);
+
+    return 0;
+}
+
+static int log_rowset_num_rows_fetched(const int rowset_num_rows_fetched) {
+    // Open the file with append mode ("a")
+    FILE *file = fopen("/tmp/odbc.log", "a");
+
+    // Check if the file was opened successfully
+    if (file == NULL) {
+        perror("Error: Unable to open the file.");
+        return 1;
+    }
+
+    // Append the string to the file
+    fprintf(file, "fetch scroll - rowset_num_rows_fetched=%d\n", rowset_num_rows_fetched);
+
+    // Close the file
+    fclose(file);
+
+    return 0;
+}
+
+static int log_scroll_fetch_encode_row(const int row_idx) {
+    // Open the file with append mode ("a")
+    FILE *file = fopen("/tmp/odbc.log", "a");
+
+    // Check if the file was opened successfully
+    if (file == NULL) {
+        perror("Error: Unable to open the file.");
+        return 1;
+    }
+
+    // Append the string to the file
+    fprintf(file, "fetch scroll - row index=%d\n", row_idx);
+
+    // Close the file
+    fclose(file);
+
+    return 0;
+}
+
+static int log_scroll_fetch_after_encoded_row_header(const int row_idx, const int num_of_cols) {
+    // Open the file with append mode ("a")
+    FILE *file = fopen("/tmp/odbc.log", "a");
+
+    // Check if the file was opened successfully
+    if (file == NULL) {
+        perror("Error: Unable to open the file.");
+        return 1;
+    }
+
+    // Append the string to the file
+    fprintf(file, "fetch scroll after encoded row header - row index=%d, num_of_cols=%d\n", row_idx, num_of_cols);
+
+    // Close the file
+    fclose(file);
+
+    return 0;
+}
+
+static int log_scroll_fetch_rowset_col_idx(const int row_idx, const int col_idx, const int rowset_col_idx) {
+    // Open the file with append mode ("a")
+    FILE *file = fopen("/tmp/odbc.log", "a");
+
+    // Check if the file was opened successfully
+    if (file == NULL) {
+        perror("Error: Unable to open the file.");
+        return 1;
+    }
+
+    // Append the string to the file
+    fprintf(file, "fetch scroll rowset col idx - row_idx=%d, col_idx=%d, rowset_col_idx=%d\n", row_idx, col_idx, rowset_col_idx);
+
+    // Close the file
+    fclose(file);
+
+    return 0;
+}
+
+static int log_encode_column_dyn_column_type(const char *col_type) {
+    // Open the file with append mode ("a")
+    FILE *file = fopen("/tmp/odbc.log", "a");
+
+    // Check if the file was opened successfully
+    if (file == NULL) {
+        perror("Error: Unable to open the file.");
+        return 1;
+    }
+
+    // Append the string to the file
+    fprintf(file, "fetch scroll rowset col idx - row_idx=%s\n", col_type);
+
+    // Close the file
+    fclose(file);
+
+    return 0;
+}
+
+static int log_scroll_fetch_after_encode_column_dyn(const int row_idx, const int col_idx) {
+    // Open the file with append mode ("a")
+    FILE *file = fopen("/tmp/odbc.log", "a");
+
+    // Check if the file was opened successfully
+    if (file == NULL) {
+        perror("Error: Unable to open the file.");
+        return 1;
+    }
+
+    // Append the string to the file
+    fprintf(file, "fetch scroll after encode column dyn - row_idx=%d, col_idx=%d\n", row_idx, col_idx);
+
+    // Close the file
+    fclose(file);
+
+    return 0;
+}
+
+static int log_scroll_fetch_after_encoded_row(const int row_idx) {
+    // Open the file with append mode ("a")
+    FILE *file = fopen("/tmp/odbc.log", "a");
+
+    // Check if the file was opened successfully
+    if (file == NULL) {
+        perror("Error: Unable to open the file.");
+        return 1;
+    }
+
+    // Append the string to the file
+    fprintf(file, "fetch scroll after encoded row - row_idx=%d\n", row_idx);
+
+    // Close the file
+    fclose(file);
+
+    return 0;
 }

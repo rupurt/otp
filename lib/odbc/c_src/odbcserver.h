@@ -22,6 +22,7 @@
 
 /* ----------------------------- CONSTANTS ------------------------------*/
 
+#define ROWSET_SIZE 128
 #define MAXCOLSIZE 8001
 #define MAX_ERR_MSG 1024
 #define ERRMSG_HEADR_SIZE 20
@@ -139,6 +140,23 @@ typedef struct {
 } db_column;
 
 typedef struct {
+    SQLCHAR name[MAX_NAME];
+    SQLSMALLINT name_len;
+    SQLSMALLINT sql_type;
+    SQLUINTEGER col_size;
+    SQLSMALLINT decimal_digits;
+    SQLSMALLINT nullable;
+} db_column_description;
+
+typedef struct {
+    char *buffer;
+    SQLSMALLINT c;
+    SQLLEN len;
+    SQLLEN  strlen_or_indptr;
+    SQLLEN *strlen_or_indptr_array; 
+} db_column_binding;
+
+typedef struct {
     int length;
     byte *buffer;
     Boolean dyn_alloc; 
@@ -172,6 +190,8 @@ typedef struct {
     SQLHENV environment_handle;    
     SQLHSTMT statement_handle;
     db_column *columns;
+    db_column_description *column_descriptions;
+    db_column_binding *column_bindings;
     int number_of_columns;
     ei_x_buff dynamic_buffer;
     Boolean associated_result_set;
@@ -191,8 +211,10 @@ typedef enum {
 #define connection_handle(db_state) (db_state -> connection_handle)
 #define environment_handle(db_state) (db_state -> environment_handle)
 #define statement_handle(db_state) (db_state -> statement_handle)
-#define columns(db_state) (db_state -> columns)
 #define nr_of_columns(db_state) (db_state -> number_of_columns)
+#define columns(db_state) (db_state -> columns)
+#define column_descriptions(db_state) (db_state -> column_descriptions)
+#define column_bindings(db_state) (db_state -> column_bindings)
 #define dynamic_buffer(db_state) (db_state -> dynamic_buffer)
 #define associated_result_set(db_state) (db_state -> associated_result_set)
 #define use_srollable_cursors(db_state) (db_state -> use_srollable_cursors)
