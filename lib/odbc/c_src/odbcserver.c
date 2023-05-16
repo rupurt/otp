@@ -261,6 +261,7 @@ static int log(const char *str);
 static int log_rowset_num_rows_fetched(const int rows_fetched);
 static int log_scroll_fetch_encode_row(const int row_idx);
 static int log_scroll_fetch_after_encoded_row_header(const int row_idx, const int num_of_cols);
+static int log_scroll_fetch_rowset_col_idx(const int row_idx, const int col_idx, const int rowset_col_idx);
 
 /* ----------------------------- CODE ------------------------------------*/
 
@@ -1542,6 +1543,7 @@ static db_result_msg encode_value_list_scroll(SQLSMALLINT num_of_columns,
             log_scroll_fetch_after_encoded_row_header(r, num_of_columns);
             for (c = 0; c < num_of_columns; c++) {
                 rowset_col_idx = (r * num_of_columns) + c;
+                log_scroll_fetch_rowset_col_idx(r, c, rowset_col_idx);
                 // TODO:
                 // - this needs to take a buffer
                 // - currently it's encoding the columns into the dynamic buffer...
@@ -3018,7 +3020,7 @@ static int log_rowset_num_rows_fetched(const int rowset_num_rows_fetched) {
     }
 
     // Append the string to the file
-    fprintf(file, "fetch scroll rowset rows fetched=%d\n", rowset_num_rows_fetched);
+    fprintf(file, "fetch scroll - rowset_num_rows_fetched=%d\n", rowset_num_rows_fetched);
 
     // Close the file
     fclose(file);
@@ -3037,7 +3039,7 @@ static int log_scroll_fetch_encode_row(const int row_idx) {
     }
 
     // Append the string to the file
-    fprintf(file, "fetch scroll row index=%d\n", row_idx);
+    fprintf(file, "fetch scroll - row index=%d\n", row_idx);
 
     // Close the file
     fclose(file);
@@ -3056,7 +3058,26 @@ static int log_scroll_fetch_after_encoded_row_header(const int row_idx, const in
     }
 
     // Append the string to the file
-    fprintf(file, "fetch scroll after encoded row header row index=%d, num_of_cols=%d\n", row_idx, num_of_cols);
+    fprintf(file, "fetch scroll after encoded row header - row index=%d, num_of_cols=%d\n", row_idx, num_of_cols);
+
+    // Close the file
+    fclose(file);
+
+    return 0;
+}
+
+static int log_scroll_fetch_rowset_col_idx(const int row_idx, const int col_idx, const int rowset_col_idx) {
+    // Open the file with append mode ("a")
+    FILE *file = fopen("/tmp/odbc.log", "a");
+
+    // Check if the file was opened successfully
+    if (file == NULL) {
+        perror("Error: Unable to open the file.");
+        return 1;
+    }
+
+    // Append the string to the file
+    fprintf(file, "fetch scroll rowset col idx - row_idx=%d, col_idx=%d, rowset_col_idx=%d\n", row_idx, col_idx, rowset_col_idx);
 
     // Close the file
     fclose(file);
