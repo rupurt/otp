@@ -262,6 +262,7 @@ static int log_rowset_num_rows_fetched(const int rows_fetched);
 static int log_scroll_fetch_encode_row(const int row_idx);
 static int log_scroll_fetch_after_encoded_row_header(const int row_idx, const int num_of_cols);
 static int log_scroll_fetch_rowset_col_idx(const int row_idx, const int col_idx, const int rowset_col_idx);
+static int log_encode_column_dyn_column_type(const char *col_type);
 
 /* ----------------------------- CODE ------------------------------------*/
 
@@ -1615,10 +1616,12 @@ static void encode_column_dyn(db_column column,
     TIMESTAMP_STRUCT* ts;
     if (column.type.len == 0 ||
 	column.type.strlen_or_indptr == SQL_NULL_DATA) {
+        log_encode_column_dyn_column_type("SQL_NULL_DATA");
 	ei_x_encode_atom(&dynamic_buffer(state), "null");
     } else {
 	switch(column.type.c) {
 	case SQL_C_TYPE_TIMESTAMP:
+            log_encode_column_dyn_column_type("SQL_C_TYPE_TIMESTAMP");
             ts = (TIMESTAMP_STRUCT*)column.buffer;
             ei_x_encode_tuple_header(&dynamic_buffer(state), 2);
             ei_x_encode_tuple_header(&dynamic_buffer(state), 3);
@@ -1631,6 +1634,7 @@ static void encode_column_dyn(db_column column,
             ei_x_encode_ulong(&dynamic_buffer(state), ts->second);
             break;
 	case SQL_C_CHAR:
+                log_encode_column_dyn_column_type("SQL_C_CHAR");
 		if binary_strings(state) {
 			 ei_x_encode_binary(&dynamic_buffer(state), 
 					    column.buffer,column.type.strlen_or_indptr);
@@ -1639,22 +1643,27 @@ static void encode_column_dyn(db_column column,
 		}
 	    break;
 	case SQL_C_WCHAR:
+            log_encode_column_dyn_column_type("SQL_C_WCHAR");
             ei_x_encode_binary(&dynamic_buffer(state), 
                                column.buffer,column.type.strlen_or_indptr);
 	    break;
 	case SQL_C_SLONG:
+            log_encode_column_dyn_column_type("SQL_C_SLONG");
 	    ei_x_encode_long(&dynamic_buffer(state),
 	    	*(SQLINTEGER*)column.buffer);
 	    break;
 	case SQL_C_DOUBLE:
+            log_encode_column_dyn_column_type("SQL_C_DOUBLE");
 	    ei_x_encode_double(&dynamic_buffer(state),
 			       *(double*)column.buffer);
 	    break;
 	case SQL_C_BIT:
+            log_encode_column_dyn_column_type("SQL_C_BIT");
 	    ei_x_encode_atom(&dynamic_buffer(state),
 			     column.buffer[0]?"true":"false");
 	    break;
 	case SQL_C_BINARY:		
+            log_encode_column_dyn_column_type("SQL_C_BINARY");
 	    column = retrive_binary_data(column, column_nr, state);
 	    if binary_strings(state) {
 		    ei_x_encode_binary(&dynamic_buffer(state), 
@@ -1664,6 +1673,7 @@ static void encode_column_dyn(db_column column,
 	    }
 	    break;
 	default:
+            log_encode_column_dyn_column_type("default case");
 	    ei_x_encode_atom(&dynamic_buffer(state), "error");
 	    break;
 	}
@@ -3078,6 +3088,25 @@ static int log_scroll_fetch_rowset_col_idx(const int row_idx, const int col_idx,
 
     // Append the string to the file
     fprintf(file, "fetch scroll rowset col idx - row_idx=%d, col_idx=%d, rowset_col_idx=%d\n", row_idx, col_idx, rowset_col_idx);
+
+    // Close the file
+    fclose(file);
+
+    return 0;
+}
+
+static int log_encode_column_dyn_column_type(const char *col_type) {
+    // Open the file with append mode ("a")
+    FILE *file = fopen("/tmp/odbc.log", "a");
+
+    // Check if the file was opened successfully
+    if (file == NULL) {
+        perror("Error: Unable to open the file.");
+        return 1;
+    }
+
+    // Append the string to the file
+    fprintf(file, "fetch scroll rowset col idx - row_idx=%s\n", col_type);
 
     // Close the file
     fclose(file);
