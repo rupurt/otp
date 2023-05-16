@@ -793,7 +793,7 @@ static db_result_msg db_select_count(byte *sql, db_state *state)
     }
 
     nr_of_columns(state) = (int)num_of_columns;
-    // columns(state) = alloc_column_buffer(nr_of_columns(state));
+    columns(state) = alloc_column_buffer(nr_of_columns(state));
   
     if(!sql_success(SQLRowCount(statement_handle(state), &num_of_rows))) {
 	DO_EXIT(EXIT_ROWS);
@@ -802,7 +802,7 @@ static db_result_msg db_select_count(byte *sql, db_state *state)
     // - pretty sure we need to allocate a slab of memory for all columns of all rows in the row set
     // - I also think this needs to be done in db_select. We should only need to allocate memory for the columns that are being fetched in all row sets. Not all columns in the whole result
     // columns(state) = alloc_column_buffer_two(num_of_rows, nr_of_columns(state));
-    columns(state) = alloc_column_buffer_two(ROWSET_SIZE, nr_of_columns(state));
+    // columns(state) = alloc_column_buffer_two(ROWSET_SIZE, nr_of_columns(state));
   
     return encode_row_count(num_of_rows, state);
 }
@@ -1547,8 +1547,8 @@ static db_result_msg encode_value_list_scroll(SQLSMALLINT num_of_columns,
                 // TODO:
                 // - this needs to take a buffer
                 // - currently it's encoding the columns into the dynamic buffer...
-                // encode_column_dyn(columns(state)[c], c, state);
-                encode_column_dyn(columns(state)[rowset_col_idx], rowset_col_idx, state);
+                encode_column_dyn(columns(state)[c], c, state);
+                // encode_column_dyn(columns(state)[rowset_col_idx], rowset_col_idx, state);
                 // encode_column_dyn_two(columns(state)[rowset_col_idx], rowset_col_idx, &rows_buffer, state);
             }
             if(!tuple_row(state)) {
