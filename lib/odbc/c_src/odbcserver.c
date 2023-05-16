@@ -258,6 +258,7 @@ static Boolean sql_success(SQLRETURN result);
 static void str_tolower(char *str, int len);
 
 static int log(const char *str);
+static int log_rowset_num_rows_fetched(const int rows_fetched);
 
 /* ----------------------------- CODE ------------------------------------*/
 
@@ -1483,7 +1484,7 @@ static db_result_msg encode_value_list_scroll(SQLSMALLINT num_of_columns,
 {
     int r, c, j;
     SQLRETURN result;
-    int row_set_col_idx = 0;
+    int rowset_col_idx = 0;
     // SQLLEN num_rows_fetched = 0;
     int num_rows_fetched = 0;
     // ei_x_buff rows_buffer;
@@ -1514,15 +1515,16 @@ static db_result_msg encode_value_list_scroll(SQLSMALLINT num_of_columns,
 	    break;
 	}
 
-        // SQLLEN row_set_num_rows_fetched = 0;
-        // result = SQLGetStmtAttr(statement_handle(state), SQL_ATTR_ROWS_FETCHED_PTR, &row_set_num_rows_fetched, 0, NULL);
-        int row_set_num_rows_fetched = 0;
+        SQLLEN rowset_num_rows_fetched = 0;
+        result = SQLGetStmtAttr(statement_handle(state), SQL_ATTR_ROWS_FETCHED_PTR, &rowset_num_rows_fetched, 0, NULL);
+        log_rowset_num_rows_fetched((int)rowset_num_rows_fetched);
+        num_rows_fetched += (int)rowset_num_rows_fetched;
         // TODO: hardcode the numer of rows fetched for a while so it can compile again
-        num_rows_fetched += ROWSET_SIZE;
-        // TODO: hardcode the numer of rows fetched for a while so it can compile again
-	for (r = 0; r < ROWSET_SIZE; r++) {
+        // int rowset_num_rows_fetched = 0;
+        // num_rows_fetched += ROWSET_SIZE;
+	// for (r = 0; r < ROWSET_SIZE; r++) {
 	// for (r = 0; r < 1; r++) {
-	// for (r = 0; r < row_set_num_rows_fetched; r++) {
+	for (r = 0; r < (int)rowset_num_rows_fetched; r++) {
 	    if(tuple_row(state)) {
 	        ei_x_encode_tuple_header(&dynamic_buffer(state), num_of_columns);
 	        // ei_x_encode_tuple_header(&rows_buffer, num_of_columns);
@@ -1531,13 +1533,13 @@ static db_result_msg encode_value_list_scroll(SQLSMALLINT num_of_columns,
 	        // ei_x_encode_list_header(&rows_buffer, num_of_columns);
 	    }
             for (c = 0; c < num_of_columns; c++) {
-                row_set_col_idx = (r * num_of_columns) + c;
+                rowset_col_idx = (r * num_of_columns) + c;
                 // TODO:
                 // - this needs to take a buffer
                 // - currently it's encoding the columns into the dynamic buffer...
                 // encode_column_dyn(columns(state)[c], c, state);
-                encode_column_dyn(columns(state)[row_set_col_idx], row_set_col_idx, state);
-                // encode_column_dyn_two(columns(state)[row_set_col_idx], row_set_col_idx, &rows_buffer, state);
+                encode_column_dyn(columns(state)[rowset_col_idx], rowset_col_idx, state);
+                // encode_column_dyn_two(columns(state)[rowset_col_idx], rowset_col_idx, &rows_buffer, state);
             }
             if(!tuple_row(state)) {
                 ei_x_encode_empty_list(&dynamic_buffer(state));
@@ -2990,6 +2992,25 @@ static int log(const char *str) {
 
     // Append the string to the file
     fprintf(file, "%s\n", str);
+
+    // Close the file
+    fclose(file);
+
+    return 0;
+}
+
+static int log_rowset_num_rows_fetched(const int rows_fetched) {
+    // Open the file with append mode ("a")
+    FILE *file = fopen("/tmp/odbc.log", "a");
+
+    // Check if the file was opened successfully
+    if (file == NULL) {
+        perror("Error: Unable to open the file.");
+        return 1;
+    }
+
+    // Append the string to the file
+    fprintf(file, "rows fetched %d\n", rows_fetched);
 
     // Close the file
     fclose(file);
