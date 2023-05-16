@@ -259,6 +259,8 @@ static void str_tolower(char *str, int len);
 
 static int log(const char *str);
 static int log_rowset_num_rows_fetched(const int rows_fetched);
+static int log_scroll_fetch_encode_row(const int row_idx);
+static int log_scroll_fetch_after_encoded_row_header(const int row_idx, const int num_of_cols);
 
 /* ----------------------------- CODE ------------------------------------*/
 
@@ -1482,11 +1484,12 @@ static db_result_msg encode_value_list_scroll(SQLSMALLINT num_of_columns,
 					      SQLINTEGER OffSet, int N,
 					      db_state *state)
 {
-    int r, c, j;
     SQLRETURN result;
+    SQLLEN rowset_num_rows_fetched = 0;
+    // SQLLEN result_num_rows_fetched = 0;
+    int result_num_rows_fetched = 0;
     int rowset_col_idx = 0;
-    // SQLLEN num_rows_fetched = 0;
-    int num_rows_fetched = 0;
+    int r, c, j;
     // ei_x_buff rows_buffer;
     db_result_msg msg;
 
@@ -1504,27 +1507,31 @@ static db_result_msg encode_value_list_scroll(SQLSMALLINT num_of_columns,
 	if((j == 1) && (Orientation == SQL_FETCH_RELATIVE)) {
 	    OffSet = 1;
 	}
-        if(j == 0) {
-            // ei_x_encode_list_header(&dynamic_buffer(state), 1);
-            ei_x_encode_list_header(&dynamic_buffer(state), ROWSET_SIZE);
-        }
 
-        SQLLEN rowset_num_rows_fetched = 0;
         result = SQLSetStmtAttr(statement_handle(state), SQL_ATTR_ROWS_FETCHED_PTR, &rowset_num_rows_fetched, 0);
+	if (result == SQL_ERROR)
+	{
+	    break;
+	}
 	result = SQLFetchScroll(statement_handle(state), Orientation, OffSet);
 	if (result == SQL_NO_DATA) // reached end of result sets
 	{
 	    break;
 	}
+        if(j == 0) {
+            // ei_x_encode_list_header(&dynamic_buffer(state), 1);
+            ei_x_encode_list_header(&dynamic_buffer(state), (int)rowset_num_rows_fetched);
+        }
 
         log_rowset_num_rows_fetched((int)rowset_num_rows_fetched);
-        num_rows_fetched += (int)rowset_num_rows_fetched;
+        result_num_rows_fetched += (int)rowset_num_rows_fetched;
         // TODO: hardcode the numer of rows fetched for a while so it can compile again
         // int rowset_num_rows_fetched = 0;
-        // num_rows_fetched += ROWSET_SIZE;
+        // result_num_rows_fetched += ROWSET_SIZE;
 	// for (r = 0; r < ROWSET_SIZE; r++) {
 	// for (r = 0; r < 1; r++) {
 	for (r = 0; r < (int)rowset_num_rows_fetched; r++) {
+            log_scroll_fetch_encode_row(r);
 	    if(tuple_row(state)) {
 	        ei_x_encode_tuple_header(&dynamic_buffer(state), num_of_columns);
 	        // ei_x_encode_tuple_header(&rows_buffer, num_of_columns);
@@ -1532,6 +1539,7 @@ static db_result_msg encode_value_list_scroll(SQLSMALLINT num_of_columns,
 	        ei_x_encode_list_header(&dynamic_buffer(state), num_of_columns);
 	        // ei_x_encode_list_header(&rows_buffer, num_of_columns);
 	    }
+            log_scroll_fetch_after_encoded_row_header(r, num_of_columns);
             for (c = 0; c < num_of_columns; c++) {
                 rowset_col_idx = (r * num_of_columns) + c;
                 // TODO:
@@ -1553,7 +1561,7 @@ static db_result_msg encode_value_list_scroll(SQLSMALLINT num_of_columns,
     // - seems like it would need to only start writing the final values at the end of collecting everything?
     // - could it use 2 ei_x_buff???
     // - ei_x_append/2 - https://github.com/erlang/otp/blob/master/lib/erl_interface/include/ei.h#L614
-    // ei_x_encode_list_header(&dynamic_buffer(state), num_rows_fetched);
+    // ei_x_encode_list_header(&dynamic_buffer(state), result_num_rows_fetched);
     // ei_x_append(&dynamic_buffer(state), &rows_buffer);
     // TODO:
     // - can I free this here?
@@ -2999,7 +3007,7 @@ static int log(const char *str) {
     return 0;
 }
 
-static int log_rowset_num_rows_fetched(const int rows_fetched) {
+static int log_rowset_num_rows_fetched(const int rowset_num_rows_fetched) {
     // Open the file with append mode ("a")
     FILE *file = fopen("/tmp/odbc.log", "a");
 
@@ -3010,7 +3018,45 @@ static int log_rowset_num_rows_fetched(const int rows_fetched) {
     }
 
     // Append the string to the file
-    fprintf(file, "rows fetched %d\n", rows_fetched);
+    fprintf(file, "fetch scroll rowset rows fetched=%d\n", rowset_num_rows_fetched);
+
+    // Close the file
+    fclose(file);
+
+    return 0;
+}
+
+static int log_scroll_fetch_encode_row(const int row_idx) {
+    // Open the file with append mode ("a")
+    FILE *file = fopen("/tmp/odbc.log", "a");
+
+    // Check if the file was opened successfully
+    if (file == NULL) {
+        perror("Error: Unable to open the file.");
+        return 1;
+    }
+
+    // Append the string to the file
+    fprintf(file, "fetch scroll row index=%d\n", row_idx);
+
+    // Close the file
+    fclose(file);
+
+    return 0;
+}
+
+static int log_scroll_fetch_after_encoded_row_header(const int row_idx, const int num_of_cols) {
+    // Open the file with append mode ("a")
+    FILE *file = fopen("/tmp/odbc.log", "a");
+
+    // Check if the file was opened successfully
+    if (file == NULL) {
+        perror("Error: Unable to open the file.");
+        return 1;
+    }
+
+    // Append the string to the file
+    fprintf(file, "fetch scroll after encoded row header row index=%d, num_of_cols=%d\n", row_idx, num_of_cols);
 
     // Close the file
     fclose(file);
