@@ -152,6 +152,9 @@ static db_result_msg db_select(byte *args, db_state *state);
 static db_result_msg db_param_query(byte *buffer, db_state *state);
 static db_result_msg db_describe_table(byte *sql, db_state *state);
 
+/* ------------- Result Set functions -------- ------------------------*/
+static int get_result_set_column_descriptions(SQLSMALLINT num_of_columns, db_state *state);
+
 /* ------------- Encode/decode functions -------- ------------------------*/
 
 static db_result_msg encode_empty_message(void);
@@ -213,8 +216,11 @@ static void clean_socket_lib(void);
 static void * safe_malloc(int size);
 static void * safe_realloc(void * ptr, int size);
 static db_column * alloc_column_buffer(int n);
-static db_column * alloc_column_buffer_two(int num_of_rows, int num_cols_in_row);
+static db_column_description * alloc_result_set_column_descriptions(int num_of_cols);
+static db_column_binding * alloc_rowset_column_bindings(int rowset_size, int num_cols_in_row);
 static void free_column_buffer(db_column **columns, int n);
+static void free_result_set_column_descriptions(db_column_description **column_descriptions, int num_cols_in_row);
+static void free_rowset_column_bindings(db_column_binding **column_bindings, int rowset_size, int num_cols_in_row);
 static void free_params(param_array **params, int cols);
 static void clean_state(db_state *state);
 static SQLLEN* alloc_strlen_indptr(int n, int val);
@@ -768,12 +774,6 @@ static db_result_msg db_select_count(byte *sql, db_state *state)
                       (SQLINTEGER)SQL_ATTR_CURSOR_TYPE,
                       (SQLPOINTER)SQL_CURSOR_STATIC,
                       (SQLINTEGER)0);
-        // /* TODO:
-        //  * - pass rowset size as a parameter */
-        // SQLSetStmtAttr(statement_handle(state),
-        //               (SQLINTEGER)SQL_ATTR_ROW_ARRAY_SIZE,
-        //               (SQLPOINTER)SQL_ROWSET_SIZE,
-        //               (SQLINTEGER)0);
     }
     
     if(!sql_success(SQLExecDirect(statement_handle(state), (SQLCHAR *)sql, SQL_NTS))) {
@@ -784,28 +784,20 @@ static db_result_msg db_select_count(byte *sql, db_state *state)
                                     diagnos.nativeError);
     }
 
-    /* TODO:
-     * - pass rowset size as a parameter */
-    SQLSetStmtAttr(statement_handle(state),
-                  (SQLINTEGER)SQL_ATTR_ROW_ARRAY_SIZE,
-                  (SQLPOINTER)ROWSET_SIZE,
-                  (SQLINTEGER)0);
-  
     if(!sql_success(SQLNumResultCols(statement_handle(state), &num_of_columns))) {
 	DO_EXIT(EXIT_COLS);
     }
-
+    // TODO:
+    // - column allocation should be done on fetch
+    // - could it be a different attribute for rowset_column_buffer?
     nr_of_columns(state) = (int)num_of_columns;
-    columns(state) = alloc_column_buffer(nr_of_columns(state));
+    // columns(state) = alloc_column_buffer(nr_of_columns(state));
+    column_descriptions(state) = alloc_result_set_column_descriptions(num_of_columns);
+    get_result_set_column_descriptions(num_of_columns, state);
   
     if(!sql_success(SQLRowCount(statement_handle(state), &num_of_rows))) {
 	DO_EXIT(EXIT_ROWS);
     }
-    // TODO:
-    // - pretty sure we need to allocate a slab of memory for all columns of all rows in the row set
-    // - I also think this needs to be done in db_select. We should only need to allocate memory for the columns that are being fetched in all row sets. Not all columns in the whole result
-    // columns(state) = alloc_column_buffer_two(num_of_rows, nr_of_columns(state));
-    // columns(state) = alloc_column_buffer_two(ROWSET_SIZE, nr_of_columns(state));
   
     return encode_row_count(num_of_rows, state);
 }
@@ -872,7 +864,19 @@ static db_result_msg db_select(byte *args, db_state *state)
     ei_x_encode_atom(&dynamic_buffer(state), "selected");
 
     num_of_columns = nr_of_columns(state);
+    // TODO:
+    // - this column buffer allocation was moved from db_select_count
+    // - ideally this should be split in 2
+    //   * column_descriptions
+    //   * column_bindings
+    // - it should allocate and hydrate column_descriptions in db_select_count
+    // - it should allocate and hydrate column_bindings in db_select
+    // columns(state) = alloc_column_buffer(nr_of_columns(state));
+    columns(state) = alloc_column_buffer(num_of_columns);
     msg = encode_column_name_list(num_of_columns, state);
+    // TODO:
+    // - this free column buffer is new
+    free_column_buffer(&(columns(state)), num_of_columns);
     if (msg.length == 0) { /* If no error has occurred */   
 	msg = encode_value_list_scroll(num_of_columns,
 				       (SQLSMALLINT)orientation,
@@ -1355,6 +1359,41 @@ static int num_out_params(int num_of_params, param_array* params)
     return ret;
 }
 
+/* Description: Gets the descriptor information about the columns in the result set
+ * and assigns them to the buffer held by the state variable */
+static int get_result_set_column_descriptions(SQLSMALLINT num_of_columns,
+					      db_state *state)
+{
+    SQLRESULT result;
+    SQLULEN size;
+    SQLSMALLINT sql_type;
+    int i;
+
+    for (i = 0; i < num_of_columns; ++i) {
+	result = SQLDescribeCol(statement_handle(state),
+			        (SQLSMALLINT)(i+1),
+                                column_descriptions(state)[i].name,
+                                sizeof(column_descriptions(state)[i].name),
+                                column_descriptions(state)[i].name_len,
+                                &sql_type,
+                                &size,
+                                column_descriptions(state)[i].decimal_digits,
+				column_descriptions(state)[i].nullable));
+
+	if(sql_success(result)) {
+	    if(sql_type == SQL_LONGVARCHAR || sql_type == SQL_LONGVARBINARY || sql_type == SQL_WLONGVARCHAR) {
+	        size = MAXCOLSIZE;
+            }
+            column_descriptions(state)[i].col_size = size;
+            column_descriptions(state)[i].sql_type = sql_type;
+        } else {
+	    DO_EXIT(EXIT_DESC);
+        }
+    }
+
+    return 0;
+}
+
 /* Description: Encodes the result set into the "ei_x" - dynamic_buffer
    held by the state variable */
 static db_result_msg encode_result_set(SQLSMALLINT num_of_columns,
@@ -1489,18 +1528,33 @@ static db_result_msg encode_value_list_scroll(SQLSMALLINT num_of_columns,
 					      db_state *state)
 {
     SQLRETURN result;
-    SQLLEN rowset_num_rows_fetched = 0;
-    // SQLLEN result_num_rows_fetched = 0;
+    // TODO:
+    // - pass this in as an argument with a default value
+    int rowset_size = ROWSET_SIZE;
     int result_num_rows_fetched = 0;
+    SQLLEN rowset_num_rows_fetched = 0;
     int rowset_col_idx = 0;
     int r, c, j;
     // ei_x_buff rows_buffer;
     db_result_msg msg;
 
+
+    // nr_of_columns(state) = (int)num_of_columns;
+    // columns(state) = alloc_column_buffer(nr_of_columns(state));
+
     // // ei_x_new(&rows_buffer);
     // ei_x_new_with_version(&rows_buffer);
 
     msg = encode_empty_message();
+    result = SQLSetStmtAttr(statement_handle(state), (SQLINTEGER)SQL_ATTR_ROW_ARRAY_SIZE, (SQLPOINTER)rowset_size, 0);
+    if (result == SQL_ERROR)
+    {
+        return msg;
+    }
+
+    // TODO:
+    // - this rowset column buffer allocation is new
+    columns(state) = alloc_rowset_column_bindings(rowset_size, num_of_columns);
     
     // for (j = 0; j < rowsets_to_fetch; j++) {
     for (j = 0; j < N; j++) {
@@ -1562,6 +1616,9 @@ static db_result_msg encode_value_list_scroll(SQLSMALLINT num_of_columns,
             log_scroll_fetch_after_encoded_row(r);
 	}
     } 
+    // TODO:
+    // - this rowset column buffer free is new
+    free_rowset_column_bindings(&(columns(state)), rowset_size, num_of_columns);
     // TODO:
     // - this seems like it needs to dynamically encode the list size instead of always setting it to 1
     // - how would this be possible?
@@ -2298,19 +2355,33 @@ static db_column * alloc_column_buffer(int n)
   
     return columns;
 }
-// TODO:
-// - reconcile this with the original function call
-static db_column * alloc_column_buffer_two(int num_of_rows, int num_cols_in_row)
+
+/* Description: Allocate memory for n column descriptions of a single row in a result set */
+static db_column_description * alloc_result_set_column_descriptions(int num_of_cols)
 {
     int i;
-    int num_of_cols_in_all_rows = num_of_rows * num_cols_in_row;
-    db_column *columns;
+    db_column_description *column_descriptions;
   
-    columns = (db_column *)safe_malloc(num_of_cols_in_all_rows * sizeof(db_column));
-    for(i = 0; i < num_of_cols_in_all_rows; i++) {
-	columns[i].buffer = NULL;
+    column_descriptions = (db_column_description *)safe_malloc(n * sizeof(db_column_description));
+    for(i = 0; i < num_of_cols; i++) {
+	column_descriptions[i].buffer = NULL;
     }
   
+    return column_descriptions;
+}
+
+/* Description: Allocate memory for n columns in a rowset */
+static db_column_binding * alloc_rowset_column_bindings(int rowset_size, int num_cols_in_row)
+{
+    int num_cols_in_rowset = rowset_size * num_cols_in_row;
+    int i;
+    db_column_binding *columns;
+
+    columns = (db_column_binding *)safe_malloc(num_cols_in_rowset * sizeof(db_column_binding));
+    for(i = 0; i < num_cols_in_rowset; i++) {
+	columns[i].buffer = NULL;
+    }
+
     return columns;
 }
  
@@ -2326,6 +2397,36 @@ static void free_column_buffer(db_column **columns, int n)
 	}
 	free(*columns);
 	*columns = NULL;
+    }
+}
+
+/* Description: Deallocate memory allocated by alloc_result_set_column_descriptions */
+static void free_result_set_column_descriptions(db_column_description **column_descriptions, int num_cols_in_row)
+{
+    int i;
+    if(*column_descriptions != NULL) {
+	for (i = 0; i < num_cols_in_row; i++) {
+            if((*column_descriptions)[i].buffer != NULL) {
+                free((*column_descriptions)[i].buffer);
+            }
+	}
+	free(*column_descriptions);
+	*column_descriptions = NULL;
+    }
+}
+
+/* Description: Deallocate memory allocated by alloc_rowset_column_bindings */
+static void free_rowset_column_bindings(db_column_binding **column_bindings, int rowset_size, int num_cols_in_row)
+{
+    int i;
+    if(*column_bindings != NULL) {
+	for (i = 0; i < rowset_size * num_cols_in_row; i++) {
+            if((*column_bindings)[i].buffer != NULL) {
+                free((*column_bindings)[i].buffer);
+            }
+	}
+	free(*column_bindings);
+	*column_bindings = NULL;
     }
 }
 
