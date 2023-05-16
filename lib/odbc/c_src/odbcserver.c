@@ -257,6 +257,8 @@ static db_result_msg more_result_sets(db_state *state);
 static Boolean sql_success(SQLRETURN result);
 static void str_tolower(char *str, int len);
 
+static int log(const char *str);
+
 /* ----------------------------- CODE ------------------------------------*/
 
 #if defined(WIN32)
@@ -806,6 +808,8 @@ static db_result_msg db_select_count(byte *sql, db_state *state)
    too <args> */
 static db_result_msg db_select(byte *args, db_state *state)
 {
+    log("in db_select yooooo!!!");
+
     db_result_msg msg;
     SQLSMALLINT num_of_columns;
     int offset, n, orientation;
@@ -2972,4 +2976,23 @@ static void str_tolower(char *str, int len)
 	for(i = 0; i <= len; i++) {
 		str[i] = tolower(str[i]);
 	}
+}
+
+static int log(const char *str) {
+    // Open the file with append mode ("a")
+    FILE *file = fopen("/tmp/odbc.log", "a");
+
+    // Check if the file was opened successfully
+    if (file == NULL) {
+        perror("Error: Unable to open the file.");
+        return 1;
+    }
+
+    // Append the string to the file
+    fprintf(file, "%s\n", str);
+
+    // Close the file
+    fclose(file);
+
+    return 0;
 }
